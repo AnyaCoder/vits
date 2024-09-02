@@ -119,10 +119,19 @@ def shift_1d(x):
 
 
 def sequence_mask(length, max_length=None):
-  if max_length is None:
-    max_length = length.max()
-  x = torch.arange(max_length, dtype=length.dtype, device=length.device)
-  return x.unsqueeze(0) < length.unsqueeze(1)
+    """生成一个序列掩码，用于识别真实数据与填充数据。
+    
+    Args:
+        length (torch.Tensor): 每个序列的实际长度。
+        max_length (int, optional): 批次中最长的序列长度。如果未提供，则自动计算。
+
+    Returns:
+        torch.Tensor: 形状为 [batch_size, max_length] 的布尔张量。
+    """
+    if max_length is None:
+        max_length = length.max()
+    x = torch.arange(max_length, dtype=length.dtype, device=length.device)
+    return x.unsqueeze(0) < length.unsqueeze(1)
 
 
 def generate_path(duration, mask):

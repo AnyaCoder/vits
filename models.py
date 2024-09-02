@@ -133,47 +133,65 @@ class DurationPredictor(nn.Module):
 
 
 class TextEncoder(nn.Module):
-  def __init__(self,
-      n_vocab,
-      out_channels,
-      hidden_channels,
-      filter_channels,
-      n_heads,
-      n_layers,
-      kernel_size,
-      p_dropout):
-    super().__init__()
-    self.n_vocab = n_vocab
-    self.out_channels = out_channels
-    self.hidden_channels = hidden_channels
-    self.filter_channels = filter_channels
-    self.n_heads = n_heads
-    self.n_layers = n_layers
-    self.kernel_size = kernel_size
-    self.p_dropout = p_dropout
+    def __init__(self, n_vocab, out_channels, hidden_channels, filter_channels, n_heads, n_layers, kernel_size, p_dropout):
+        """文本编码器的初始化函数，用于设置模型的参数和层。
+        
+        Args:
+            n_vocab (int): 词汇表大小。
+            out_channels (int): 输出通道数。
+            hidden_channels (int): 隐藏层通道数。
+            filter_channels (int): 滤波器通道数。
+            n_heads (int): 注意力机制的头数。
+            n_layers (int): 编码器层数。
+            kernel_size (int): 卷积核大小。
+            p_dropout (float): Dropout比率。
+        """
+        super().__init__()
+        self.n_vocab = n_vocab
+        self.out_channels = out_channels
+        self.hidden_channels = hidden_channels
+        self.filter_channels = filter_channels
+        self.n_heads = n_heads
+        self.n_layers = n_layers
+        self.kernel_size = kernel_size
+        self.p_dropout = p_dropout
 
-    self.emb = nn.Embedding(n_vocab, hidden_channels)
-    nn.init.normal_(self.emb.weight, 0.0, hidden_channels**-0.5)
+        # 词嵌入层
+        self.emb = nn.Embedding(n_vocab, hidden_channels)
+        nn.init.normal_(self.emb.weight, 0.0, hidden_channels**-0.5)
 
-    self.encoder = attentions.Encoder(
-      hidden_channels,
-      filter_channels,
-      n_heads,
-      n_layers,
-      kernel_size,
-      p_dropout)
-    self.proj= nn.Conv1d(hidden_channels, out_channels * 2, 1)
+        # 编码器层
+        self.encoder = attentions.Encoder(
+            hidden_channels,
+            filter_channels,
+            n_heads,
+            n_layers,
+            kernel_size,
+            p_dropout
+        )
 
-  def forward(self, x, x_lengths):
-    x = self.emb(x) * math.sqrt(self.hidden_channels) # [b, t, h]
-    x = torch.transpose(x, 1, -1) # [b, h, t]
-    x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(2)), 1).to(x.dtype)
+        # 输出层，将隐藏状态映射到输出通道的两倍长的向量
+        self.proj = nn.Conv1d(hidden_channels, out_channels * 2, 1)
 
-    x = self.encoder(x * x_mask, x_mask)
-    stats = self.proj(x) * x_mask
+    def forward(self, x, x_lengths):
+        """前向传播函数。
 
-    m, logs = torch.split(stats, self.out_channels, dim=1)
-    return x, m, logs, x_mask
+        Args:
+            x (torch.Tensor): 输入的索引张量。
+            x_lengths (torch.Tensor): 每个序列的实际长度。
+
+        Returns:
+            tuple: 包含编码后的输出、均值、对数方差和掩码的元组。
+        """
+        x = self.emb(x) * math.sqrt(self.hidden_channels)  # 缩放嵌入
+        x = torch.transpose(x, 1, -1)  # 调整维度以匹配卷积层 [batch_size, hidden_channels, seq_length]
+        x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(2)), 1).to(x.dtype)  # 生成并调整掩码形状
+
+        x = self.encoder(x * x_mask, x_mask)  # 编码器处理，应用掩码
+        stats = self.proj(x) * x_mask  # 应用输出映射，并使用掩码屏蔽输出
+
+        m, logs = torch.split(stats, self.out_channels, dim=1)  # 分离均值和对数方差
+        return x, m, logs, x_mask
 
 
 class ResidualCouplingBlock(nn.Module):
