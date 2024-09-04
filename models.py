@@ -17,7 +17,7 @@ from commons import init_weights, get_padding
 class StochasticDurationPredictor(nn.Module):
   def __init__(self, in_channels, filter_channels, kernel_size, p_dropout, n_flows=4, gin_channels=0):
     super().__init__()
-    filter_channels = in_channels # it needs to be removed from future version.
+    filter_channels = in_channels  # it needs to be removed from future version.
     self.in_channels = in_channels
     self.filter_channels = filter_channels
     self.kernel_size = kernel_size
@@ -27,72 +27,75 @@ class StochasticDurationPredictor(nn.Module):
 
     self.log_flow = modules.Log()
     self.flows = nn.ModuleList()
-    self.flows.append(modules.ElementwiseAffine(2))
+    self.flows.append(modules.ElementwiseAffine(2))  # ElementwiseAffine for 2 channels
     for i in range(n_flows):
-      self.flows.append(modules.ConvFlow(2, filter_channels, kernel_size, n_layers=3))
-      self.flows.append(modules.Flip())
+      self.flows.append(modules.ConvFlow(2, filter_channels, kernel_size, n_layers=3))  # ConvFlow for 2 channels
+      self.flows.append(modules.Flip())  # Flip module
 
-    self.post_pre = nn.Conv1d(1, filter_channels, 1)
-    self.post_proj = nn.Conv1d(filter_channels, filter_channels, 1)
-    self.post_convs = modules.DDSConv(filter_channels, kernel_size, n_layers=3, p_dropout=p_dropout)
+    self.post_pre = nn.Conv1d(1, filter_channels, 1)  # [1, filter_channels, 1]
+    self.post_proj = nn.Conv1d(filter_channels, filter_channels, 1)  # [filter_channels, filter_channels, 1]
+    self.post_convs = modules.DDSConv(filter_channels, kernel_size, n_layers=3, p_dropout=p_dropout)  # Custom convolutional module
     self.post_flows = nn.ModuleList()
-    self.post_flows.append(modules.ElementwiseAffine(2))
+    self.post_flows.append(modules.ElementwiseAffine(2))  # ElementwiseAffine for 2 channels
     for i in range(4):
-      self.post_flows.append(modules.ConvFlow(2, filter_channels, kernel_size, n_layers=3))
-      self.post_flows.append(modules.Flip())
+      self.post_flows.append(modules.ConvFlow(2, filter_channels, kernel_size, n_layers=3))  # ConvFlow for 2 channels
+      self.post_flows.append(modules.Flip())  # Flip module
 
-    self.pre = nn.Conv1d(in_channels, filter_channels, 1)
-    self.proj = nn.Conv1d(filter_channels, filter_channels, 1)
-    self.convs = modules.DDSConv(filter_channels, kernel_size, n_layers=3, p_dropout=p_dropout)
+    self.pre = nn.Conv1d(in_channels, filter_channels, 1)  # [in_channels, filter_channels, 1]
+    self.proj = nn.Conv1d(filter_channels, filter_channels, 1)  # [filter_channels, filter_channels, 1]
+    self.convs = modules.DDSConv(filter_channels, kernel_size, n_layers=3, p_dropout=p_dropout)  # Custom convolutional module
     if gin_channels != 0:
-      self.cond = nn.Conv1d(gin_channels, filter_channels, 1)
+      self.cond = nn.Conv1d(gin_channels, filter_channels, 1)  # [gin_channels, filter_channels, 1]
 
   def forward(self, x, x_mask, w=None, g=None, reverse=False, noise_scale=1.0):
+    # x.shape: [batch_size, in_channels, x_seqlen]
+    # x_mask.shape: [batch_size, 1, x_seqlen]
     x = torch.detach(x)
-    x = self.pre(x)
+    x = self.pre(x)  # [batch_size, filter_channels, x_seqlen]
     if g is not None:
       g = torch.detach(g)
-      x = x + self.cond(g)
-    x = self.convs(x, x_mask)
-    x = self.proj(x) * x_mask
+      x = x + self.cond(g)  # [batch_size, filter_channels, x_seqlen]
+    x = self.convs(x, x_mask)  # [batch_size, filter_channels, x_seqlen]
+    x = self.proj(x) * x_mask  # [batch_size, filter_channels, x_seqlen]
 
     if not reverse:
       flows = self.flows
       assert w is not None
 
-      logdet_tot_q = 0 
-      h_w = self.post_pre(w)
-      h_w = self.post_convs(h_w, x_mask)
-      h_w = self.post_proj(h_w) * x_mask
-      e_q = torch.randn(w.size(0), 2, w.size(2)).to(device=x.device, dtype=x.dtype) * x_mask
-      z_q = e_q
+      logdet_tot_q = 0
+      h_w = self.post_pre(w)  # [batch_size, filter_channels, x_seqlen]
+      h_w = self.post_convs(h_w, x_mask)  # [batch_size, filter_channels, x_seqlen]
+      h_w = self.post_proj(h_w) * x_mask  # [batch_size, filter_channels, x_seqlen]
+      e_q = torch.randn(w.size(0), 2, w.size(2)).to(device=x.device, dtype=x.dtype) * x_mask  # [batch_size, 2, x_seqlen]
+      z_q = e_q  # [batch_size, 2, x_seqlen]
       for flow in self.post_flows:
-        z_q, logdet_q = flow(z_q, x_mask, g=(x + h_w))
-        logdet_tot_q += logdet_q
-      z_u, z1 = torch.split(z_q, [1, 1], 1) 
-      u = torch.sigmoid(z_u) * x_mask
-      z0 = (w - u) * x_mask
-      logdet_tot_q += torch.sum((F.logsigmoid(z_u) + F.logsigmoid(-z_u)) * x_mask, [1,2])
-      logq = torch.sum(-0.5 * (math.log(2*math.pi) + (e_q**2)) * x_mask, [1,2]) - logdet_tot_q
+        z_q, logdet_q = flow(z_q, x_mask, g=(x + h_w))  # [batch_size, 2, x_seqlen], [batch_size]
+        logdet_tot_q += logdet_q  # [batch_size]
+      z_u, z1 = torch.split(z_q, [1, 1], 1)  # z_u.shape: [batch_size, 1, x_seqlen], z1.shape: [batch_size, 1, x_seqlen]
+      u = torch.sigmoid(z_u) * x_mask  # [batch_size, 1, x_seqlen]
+      z0 = (w - u) * x_mask  # [batch_size, 1, x_seqlen]
+      logdet_tot_q += torch.sum((F.logsigmoid(z_u) + F.logsigmoid(-z_u)) * x_mask, [1, 2])  # [batch_size]
+      logq = torch.sum(-0.5 * (math.log(2 * math.pi) + (e_q ** 2)) * x_mask, [1, 2]) - logdet_tot_q  # [batch_size]
 
       logdet_tot = 0
-      z0, logdet = self.log_flow(z0, x_mask)
-      logdet_tot += logdet
-      z = torch.cat([z0, z1], 1)
+      z0, logdet = self.log_flow(z0, x_mask)  # z0.shape: [batch_size, 1, x_seqlen], logdet.shape: [batch_size]
+      logdet_tot += logdet  # [batch_size]
+      z = torch.cat([z0, z1], 1)  # [batch_size, 2, x_seqlen]
       for flow in flows:
-        z, logdet = flow(z, x_mask, g=x, reverse=reverse)
-        logdet_tot = logdet_tot + logdet
-      nll = torch.sum(0.5 * (math.log(2*math.pi) + (z**2)) * x_mask, [1,2]) - logdet_tot
-      return nll + logq # [b]
+        z, logdet = flow(z, x_mask, g=x, reverse=reverse)  # [batch_size, 2, x_seqlen], [batch_size]
+        logdet_tot = logdet_tot + logdet  # [batch_size]
+      nll = torch.sum(0.5 * (math.log(2 * math.pi) + (z ** 2)) * x_mask, [1, 2]) - logdet_tot  # [batch_size]
+      return nll + logq  # [batch_size]
     else:
       flows = list(reversed(self.flows))
-      flows = flows[:-2] + [flows[-1]] # remove a useless vflow
-      z = torch.randn(x.size(0), 2, x.size(2)).to(device=x.device, dtype=x.dtype) * noise_scale
+      flows = flows[:-2] + [flows[-1]]  # remove a useless flow
+      z = torch.randn(x.size(0), 2, x.size(2)).to(device=x.device, dtype=x.dtype) * noise_scale  # [batch_size, 2, x_seqlen]
       for flow in flows:
-        z = flow(z, x_mask, g=x, reverse=reverse)
-      z0, z1 = torch.split(z, [1, 1], 1)
-      logw = z0
-      return logw
+        z = flow(z, x_mask, g=x, reverse=reverse)  # [batch_size, 2, x_seqlen]
+      z0, z1 = torch.split(z, [1, 1], 1)  # z0.shape: [batch_size, 1, x_seqlen], z1.shape: [batch_size, 1, x_seqlen]
+      logw = z0  # [batch_size, 1, x_seqlen]
+      return logw  # [batch_size, 1, x_seqlen]
+
 
 
 class DurationPredictor(nn.Module):
@@ -133,65 +136,82 @@ class DurationPredictor(nn.Module):
 
 
 class TextEncoder(nn.Module):
-    def __init__(self, n_vocab, out_channels, hidden_channels, filter_channels, n_heads, n_layers, kernel_size, p_dropout):
-        """文本编码器的初始化函数，用于设置模型的参数和层。
-        
-        Args:
-            n_vocab (int): 词汇表大小。
-            out_channels (int): 输出通道数。
-            hidden_channels (int): 隐藏层通道数。
-            filter_channels (int): 滤波器通道数。
-            n_heads (int): 注意力机制的头数。
-            n_layers (int): 编码器层数。
-            kernel_size (int): 卷积核大小。
-            p_dropout (float): Dropout比率。
-        """
-        super().__init__()
-        self.n_vocab = n_vocab
-        self.out_channels = out_channels
-        self.hidden_channels = hidden_channels
-        self.filter_channels = filter_channels
-        self.n_heads = n_heads
-        self.n_layers = n_layers
-        self.kernel_size = kernel_size
-        self.p_dropout = p_dropout
+  def __init__(self, n_vocab, out_channels, hidden_channels, filter_channels, n_heads, n_layers, kernel_size, p_dropout):
+    """文本编码器的初始化函数，用于设置模型的参数和层。
+    
+    Args:
+        n_vocab (int): 词汇表大小。
+        out_channels (int): 输出通道数。
+        hidden_channels (int): 隐藏层通道数。
+        filter_channels (int): 滤波器通道数。
+        n_heads (int): 注意力机制的头数。
+        n_layers (int): 编码器层数。
+        kernel_size (int): 卷积核大小。
+        p_dropout (float): Dropout比率。
+    """
+    super().__init__()
+    self.n_vocab = n_vocab
+    self.out_channels = out_channels
+    self.hidden_channels = hidden_channels
+    self.filter_channels = filter_channels
+    self.n_heads = n_heads
+    self.n_layers = n_layers
+    self.kernel_size = kernel_size
+    self.p_dropout = p_dropout
 
-        # 词嵌入层
-        self.emb = nn.Embedding(n_vocab, hidden_channels)
-        nn.init.normal_(self.emb.weight, 0.0, hidden_channels**-0.5)
+    # 词嵌入层
+    self.emb = nn.Embedding(n_vocab, hidden_channels)
+    nn.init.normal_(self.emb.weight, 0.0, hidden_channels**-0.5)
 
-        # 编码器层
-        self.encoder = attentions.Encoder(
-            hidden_channels,
-            filter_channels,
-            n_heads,
-            n_layers,
-            kernel_size,
-            p_dropout
-        )
+    # 编码器层
+    self.encoder = attentions.Encoder(
+        hidden_channels,
+        filter_channels,
+        n_heads,
+        n_layers,
+        kernel_size,
+        p_dropout
+    )
 
-        # 输出层，将隐藏状态映射到输出通道的两倍长的向量
-        self.proj = nn.Conv1d(hidden_channels, out_channels * 2, 1)
+    # 输出层，将隐藏状态映射到输出通道的两倍长的向量
+    self.proj = nn.Conv1d(hidden_channels, out_channels * 2, 1)
 
-    def forward(self, x, x_lengths):
-        """前向传播函数。
+  def forward(self, x, x_lengths):
+    """前向传播函数。
 
-        Args:
-            x (torch.Tensor): 输入的索引张量。
-            x_lengths (torch.Tensor): 每个序列的实际长度。
+    Args:
+        x (torch.Tensor): 输入的索引张量。
+        x_lengths (torch.Tensor): 每个序列的实际长度。
 
-        Returns:
-            tuple: 包含编码后的输出、均值、对数方差和掩码的元组。
-        """
-        x = self.emb(x) * math.sqrt(self.hidden_channels)  # 缩放嵌入
-        x = torch.transpose(x, 1, -1)  # 调整维度以匹配卷积层 [batch_size, hidden_channels, seq_length]
-        x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(2)), 1).to(x.dtype)  # 生成并调整掩码形状
+    Returns:
+        tuple: 包含编码后的输出、均值、对数方差和掩码的元组。
+    """
+    
+    x = self.emb(x) * math.sqrt(self.hidden_channels)  
+    # x.shape: [batch_size, seq_length, hidden_channels]
 
-        x = self.encoder(x * x_mask, x_mask)  # 编码器处理，应用掩码
-        stats = self.proj(x) * x_mask  # 应用输出映射，并使用掩码屏蔽输出
+    x = torch.transpose(x, 1, -1)  
+    # x.shape: [batch_size, hidden_channels, seq_length]
 
-        m, logs = torch.split(stats, self.out_channels, dim=1)  # 分离均值和对数方差
-        return x, m, logs, x_mask
+    x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(2)), 1).to(x.dtype) 
+    # x_mask.shape: [batch_size, 1, seq_length]
+
+    x = self.encoder(x * x_mask, x_mask) 
+    # x.shape: [batch_size, hidden_channels, seq_length]
+
+    stats = self.proj(x) * x_mask  
+    # stats.shape: [batch_size, out_channels * 2, seq_length]
+
+    # 分离均值和对数方差, out_channels个均值， out_channels个对数方差。
+    m, logs = torch.split(stats, self.out_channels, dim=1)  
+    # m.shape: [batch_size, out_channels, seq_length]
+    # logs.shape: [batch_size, out_channels, seq_length]
+
+    return x, m, logs, x_mask  
+    # x.shape: [batch_size, hidden_channels, seq_length],
+    # m.shape: [batch_size, out_channels, seq_length], 
+    # logs.shape: [batch_size, out_channels, seq_length], 
+    # x_mask.shape: [batch_size, 1, seq_length]
 
 
 class ResidualCouplingBlock(nn.Module):
@@ -220,11 +240,14 @@ class ResidualCouplingBlock(nn.Module):
   def forward(self, x, x_mask, g=None, reverse=False):
     if not reverse:
       for flow in self.flows:
-        x, _ = flow(x, x_mask, g=g, reverse=reverse)
+        x, _ = flow(x, x_mask, g=g, reverse=reverse)  
+        # x.shape: [batch_size, channels, seq_length]
     else:
       for flow in reversed(self.flows):
-        x = flow(x, x_mask, g=g, reverse=reverse)
-    return x
+        x = flow(x, x_mask, g=g, reverse=reverse)  
+        # x.shape: [batch_size, channels, seq_length]
+    return x  
+    # Output shape: [batch_size, channels, seq_length]
 
 
 class PosteriorEncoder(nn.Module):
@@ -250,13 +273,31 @@ class PosteriorEncoder(nn.Module):
     self.proj = nn.Conv1d(hidden_channels, out_channels * 2, 1)
 
   def forward(self, x, x_lengths, g=None):
-    x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(2)), 1).to(x.dtype)
-    x = self.pre(x) * x_mask
-    x = self.enc(x, x_mask, g=g)
-    stats = self.proj(x) * x_mask
-    m, logs = torch.split(stats, self.out_channels, dim=1)
-    z = (m + torch.randn_like(m) * torch.exp(logs)) * x_mask
-    return z, m, logs, x_mask
+    x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(2)), 1).to(x.dtype)  
+    # x_mask.shape: [batch_size, 1, seq_length]
+
+    x = self.pre(x) * x_mask  
+    # x.shape: [batch_size, hidden_channels, seq_length]
+
+    x = self.enc(x, x_mask, g=g)  
+    # x.shape: [batch_size, hidden_channels, seq_length]
+
+    stats = self.proj(x) * x_mask 
+    # stats.shape: [batch_size, out_channels * 2, seq_length]
+
+    m, logs = torch.split(stats, self.out_channels, dim=1)  
+    # m.shape: [batch_size, out_channels, seq_length], 
+    # logs.shape: [batch_size, out_channels, seq_length]
+
+    z = (m + torch.randn_like(m) * torch.exp(logs)) * x_mask  
+    # z.shape: [batch_size, out_channels, seq_length]
+
+    return z, m, logs, x_mask  
+    # Output shapes: 
+    # z: [batch_size, out_channels, seq_length], 
+    # m: [batch_size, out_channels, seq_length], 
+    # logs: [batch_size, out_channels, seq_length], 
+    # x_mask: [batch_size, 1, seq_length]
 
 
 class Generator(torch.nn.Module):
@@ -453,7 +494,7 @@ class SynthesizerTrn(nn.Module):
     self.gin_channels = gin_channels
 
     self.use_sdp = use_sdp
-
+    # 文本 先验编码器
     self.enc_p = TextEncoder(n_vocab,
         inter_channels,
         hidden_channels,
@@ -462,57 +503,114 @@ class SynthesizerTrn(nn.Module):
         n_layers,
         kernel_size,
         p_dropout)
+    # 波形生成器 
     self.dec = Generator(inter_channels, resblock, resblock_kernel_sizes, resblock_dilation_sizes, upsample_rates, upsample_initial_channel, upsample_kernel_sizes, gin_channels=gin_channels)
+    # 后验编码器
     self.enc_q = PosteriorEncoder(spec_channels, inter_channels, hidden_channels, 5, 1, 16, gin_channels=gin_channels)
+    # FLOW 模块 残差耦合块
     self.flow = ResidualCouplingBlock(inter_channels, hidden_channels, 5, 1, 4, gin_channels=gin_channels)
 
     if use_sdp:
+      # 随机时长预测器
       self.dp = StochasticDurationPredictor(hidden_channels, 192, 3, 0.5, 4, gin_channels=gin_channels)
     else:
+      # 指定时长预测器
       self.dp = DurationPredictor(hidden_channels, 256, 3, 0.5, gin_channels=gin_channels)
 
     if n_speakers > 1:
+      # 说话人嵌入
       self.emb_g = nn.Embedding(n_speakers, gin_channels)
 
   def forward(self, x, x_lengths, y, y_lengths, sid=None):
-
+    # 文本 -> 先验编码器 -> 条件先验分布
     x, m_p, logs_p, x_mask = self.enc_p(x, x_lengths)
+    # x.shape: [batch_size, self.hidden_channels, x_seqlen],
+    # m_p.shape: [batch_size, self.inter_channels, x_seqlen], 
+    # logs_p.shape: [batch_size, self.inter_channels, x_seqlen], 
+    # x_mask.shape: [batch_size, 1, x_seqlen]
+
+    # 加入说话人信息
     if self.n_speakers > 0:
-      g = self.emb_g(sid).unsqueeze(-1) # [b, h, 1]
+      g = self.emb_g(sid).unsqueeze(-1)  # [batch_size, self.hidden_channels, 1]
     else:
-      g = None
+      g = None  # g remains None if no speaker information
 
+    # 线性谱 -> 后验编码器
     z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths, g=g)
-    z_p = self.flow(z, y_mask, g=g)
+    # z.shape: [batch_size, self.inter_channels, y_seqlen], 
+    # m_q.shape: [batch_size, self.inter_channels, y_seqlen], 
+    # logs_q.shape: [batch_size, self.inter_channels, y_seqlen], 
+    # y_mask.shape: [batch_size, 1, y_seqlen]
 
+    # 经过 flow 获得复杂分布
+    z_p = self.flow(z, y_mask, g=g)
+    # z_p.shape: [batch_size, self.inter_channels, y_seqlen]
+    
+    __doc__ = """
+    详见 models.md 负交叉熵公式
+    """
     with torch.no_grad():
       # negative cross-entropy
-      s_p_sq_r = torch.exp(-2 * logs_p) # [b, d, t]
-      neg_cent1 = torch.sum(-0.5 * math.log(2 * math.pi) - logs_p, [1], keepdim=True) # [b, 1, t_s]
-      neg_cent2 = torch.matmul(-0.5 * (z_p ** 2).transpose(1, 2), s_p_sq_r) # [b, t_t, d] x [b, d, t_s] = [b, t_t, t_s]
-      neg_cent3 = torch.matmul(z_p.transpose(1, 2), (m_p * s_p_sq_r)) # [b, t_t, d] x [b, d, t_s] = [b, t_t, t_s]
-      neg_cent4 = torch.sum(-0.5 * (m_p ** 2) * s_p_sq_r, [1], keepdim=True) # [b, 1, t_s]
-      neg_cent = neg_cent1 + neg_cent2 + neg_cent3 + neg_cent4
+      s_p_sq_r = torch.exp(-2 * logs_p)  
+      # s_p_sq_r.shape: [batch_size, self.inter_channels, x_seqlen]
+      
+      neg_cent1 = torch.sum(-0.5 * math.log(2 * math.pi) - logs_p, [1], keepdim=True)  
+      # neg_cent1.shape: [batch_size, 1, x_seqlen]
+      
+      neg_cent2 = torch.matmul(-0.5 * (z_p ** 2).transpose(1, 2), s_p_sq_r)  
+      # z_p.transpose(1, 2).shape: [batch_size, y_seqlen, self.inter_channels]
+      # neg_cent2.shape: [batch_size, y_seqlen, x_seqlen]
+      
+      neg_cent3 = torch.matmul(z_p.transpose(1, 2), (m_p * s_p_sq_r))  
+      # m_p * s_p_sq_r.shape: [batch_size, self.inter_channels, x_seqlen]
+      # neg_cent3.shape: [batch_size, y_seqlen, x_seqlen]
+      
+      neg_cent4 = torch.sum(-0.5 * (m_p ** 2) * s_p_sq_r, [1], keepdim=True)  
+      # neg_cent4.shape: [batch_size, 1, x_seqlen]
+      
+      neg_cent = neg_cent1 + neg_cent2 + neg_cent3 + neg_cent4  
+      # neg_cent.shape: [batch_size, y_seqlen, x_seqlen]
 
-      attn_mask = torch.unsqueeze(x_mask, 2) * torch.unsqueeze(y_mask, -1)
-      attn = monotonic_align.maximum_path(neg_cent, attn_mask.squeeze(1)).unsqueeze(1).detach()
+      # x_mask.shape: [batch_size, 1, x_seqlen]
+      # y_mask.shape: [batch_size, 1, y_seqlen]
+      attn_mask = torch.unsqueeze(x_mask, 2) * torch.unsqueeze(y_mask, -1)  
+      # attn_mask.shape: [batch_size, 1, y_seqlen, x_seqlen]
+      
+      attn = monotonic_align.maximum_path(neg_cent, attn_mask.squeeze(1)).unsqueeze(1).detach()  
+      # attn.shape: [batch_size, 1, y_seqlen, x_seqlen]
 
-    w = attn.sum(2)
+    w = attn.sum(2)  
+    # w.shape: [batch_size, 1, x_seqlen]
+    
     if self.use_sdp:
-      l_length = self.dp(x, x_mask, w, g=g)
-      l_length = l_length / torch.sum(x_mask)
+      l_length = self.dp(x, x_mask, w, g=g)  
+      # l_length.shape: [batch_size, 1, x_seqlen]
+      l_length = l_length / torch.sum(x_mask)  
+      # l_length.shape: scalar (average over x_mask)
     else:
-      logw_ = torch.log(w + 1e-6) * x_mask
-      logw = self.dp(x, x_mask, g=g)
-      l_length = torch.sum((logw - logw_)**2, [1,2]) / torch.sum(x_mask) # for averaging 
+      logw_ = torch.log(w + 1e-6) * x_mask  
+      # logw_.shape: [batch_size, 1, x_seqlen]
+      logw = self.dp(x, x_mask, g=g)  
+      # logw.shape: [batch_size, 1, x_seqlen]
+      l_length = torch.sum((logw - logw_) ** 2, [1, 2]) / torch.sum(x_mask)  
+      # l_length.shape: scalar
 
     # expand prior
-    m_p = torch.matmul(attn.squeeze(1), m_p.transpose(1, 2)).transpose(1, 2)
-    logs_p = torch.matmul(attn.squeeze(1), logs_p.transpose(1, 2)).transpose(1, 2)
+    m_p = torch.matmul(attn.squeeze(1), m_p.transpose(1, 2)).transpose(1, 2) 
+    # m_p.shape: [batch_size, self.inter_channels, y_seqlen]
+    
+    logs_p = torch.matmul(attn.squeeze(1), logs_p.transpose(1, 2)).transpose(1, 2) 
+    # logs_p.shape: [batch_size, self.inter_channels, y_seqlen]
 
     z_slice, ids_slice = commons.rand_slice_segments(z, y_lengths, self.segment_size)
+    # z_slice.shape: [batch_size, self.inter_channels, segment_size]
+    # ids_slice.shape: [batch_size]
+
     o = self.dec(z_slice, g=g)
+    # o.shape: [batch_size, output_channels, segment_size]
+
     return o, l_length, attn, ids_slice, x_mask, y_mask, (z, z_p, m_p, logs_p, m_q, logs_q)
+  
 
   def infer(self, x, x_lengths, sid=None, noise_scale=1, length_scale=1, noise_scale_w=1., max_len=None):
     x, m_p, logs_p, x_mask = self.enc_p(x, x_lengths)

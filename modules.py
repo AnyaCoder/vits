@@ -146,34 +146,46 @@ class WN(torch.nn.Module):
       self.res_skip_layers.append(res_skip_layer)
 
   def forward(self, x, x_mask, g=None, **kwargs):
-    output = torch.zeros_like(x)
-    n_channels_tensor = torch.IntTensor([self.hidden_channels])
+    output = torch.zeros_like(x)  
+    # output.shape: [batch_size, hidden_channels, seq_length]
+    n_channels_tensor = torch.IntTensor([self.hidden_channels])  
+    # For use in fused_add_tanh_sigmoid_multiply
 
     if g is not None:
-      g = self.cond_layer(g)
+      g = self.cond_layer(g)  
+      # g.shape: [batch_size, 2*hidden_channels*n_layers, seq_length]
 
     for i in range(self.n_layers):
-      x_in = self.in_layers[i](x)
+      x_in = self.in_layers[i](x)  
+      # x_in.shape: [batch_size, 2*hidden_channels, seq_length]
       if g is not None:
         cond_offset = i * 2 * self.hidden_channels
-        g_l = g[:,cond_offset:cond_offset+2*self.hidden_channels,:]
+        g_l = g[:, cond_offset:cond_offset+2*self.hidden_channels, :]  
+        # g_l.shape: [batch_size, 2*hidden_channels, seq_length]
       else:
-        g_l = torch.zeros_like(x_in)
+        g_l = torch.zeros_like(x_in)  
+        # g_l.shape: [batch_size, 2*hidden_channels, seq_length]
 
-      acts = commons.fused_add_tanh_sigmoid_multiply(
-          x_in,
-          g_l,
-          n_channels_tensor)
-      acts = self.drop(acts)
+      acts = commons.fused_add_tanh_sigmoid_multiply(x_in, g_l, n_channels_tensor)  
+      # acts.shape: [batch_size, hidden_channels, seq_length]
+      acts = self.drop(acts)  
+      # acts.shape: [batch_size, hidden_channels, seq_length]
 
-      res_skip_acts = self.res_skip_layers[i](acts)
+      res_skip_acts = self.res_skip_layers[i](acts)  
+      # res_skip_acts.shape: varies based on i
       if i < self.n_layers - 1:
-        res_acts = res_skip_acts[:,:self.hidden_channels,:]
-        x = (x + res_acts) * x_mask
-        output = output + res_skip_acts[:,self.hidden_channels:,:]
+        res_acts = res_skip_acts[:, :self.hidden_channels, :] 
+        # res_acts.shape: [batch_size, hidden_channels, seq_length]
+        x = (x + res_acts) * x_mask  
+        # x.shape: [batch_size, hidden_channels, seq_length]
+        output = output + res_skip_acts[:, self.hidden_channels:, :]  
+        # output.shape: [batch_size, hidden_channels, seq_length]
       else:
-        output = output + res_skip_acts
-    return output * x_mask
+        output = output + res_skip_acts  
+        # output.shape: [batch_size, hidden_channels, seq_length]
+
+    return output * x_mask  
+    # [batch_size, hidden_channels, seq_length]
 
   def remove_weight_norm(self):
     if self.gin_channels != 0:
@@ -181,7 +193,7 @@ class WN(torch.nn.Module):
     for l in self.in_layers:
       torch.nn.utils.remove_weight_norm(l)
     for l in self.res_skip_layers:
-     torch.nn.utils.remove_weight_norm(l)
+      torch.nn.utils.remove_weight_norm(l)
 
 
 class ResBlock1(torch.nn.Module):
@@ -269,9 +281,11 @@ class Log(nn.Module):
 
 class Flip(nn.Module):
   def forward(self, x, *args, reverse=False, **kwargs):
-    x = torch.flip(x, [1])
+    x = torch.flip(x, [1])  
+    # x.shape: [batch_size, channels, seq_length] (flips along channel dimension)
     if not reverse:
-      logdet = torch.zeros(x.size(0)).to(dtype=x.dtype, device=x.device)
+      logdet = torch.zeros(x.size(0)).to(dtype=x.dtype, device=x.device)  
+      # logdet.shape: [batch_size]
       return x, logdet
     else:
       return x
@@ -281,18 +295,21 @@ class ElementwiseAffine(nn.Module):
   def __init__(self, channels):
     super().__init__()
     self.channels = channels
-    self.m = nn.Parameter(torch.zeros(channels,1))
-    self.logs = nn.Parameter(torch.zeros(channels,1))
+    self.m = nn.Parameter(torch.zeros(channels, 1))  # [channels, 1]
+    self.logs = nn.Parameter(torch.zeros(channels, 1))  # [channels, 1]
 
   def forward(self, x, x_mask, reverse=False, **kwargs):
+    # x.shape: [batch_size, channels, x_seqlen]
+    # x_mask.shape: [batch_size, 1, x_seqlen]
     if not reverse:
-      y = self.m + torch.exp(self.logs) * x
-      y = y * x_mask
-      logdet = torch.sum(self.logs * x_mask, [1,2])
-      return y, logdet
+      y = self.m + torch.exp(self.logs) * x  # [batch_size, channels, x_seqlen]
+      y = y * x_mask  # [batch_size, channels, x_seqlen]
+      logdet = torch.sum(self.logs * x_mask, [1, 2])  # [batch_size]
+      return y, logdet  # [batch_size, channels, x_seqlen], [batch_size]
     else:
-      x = (x - self.m) * torch.exp(-self.logs) * x_mask
-      return x
+      x = (x - self.m) * torch.exp(-self.logs) * x_mask  # [batch_size, channels, x_seqlen]
+      return x  # [batch_size, channels, x_seqlen]
+
 
 
 class ResidualCouplingLayer(nn.Module):
@@ -322,24 +339,40 @@ class ResidualCouplingLayer(nn.Module):
     self.post.bias.data.zero_()
 
   def forward(self, x, x_mask, g=None, reverse=False):
-    x0, x1 = torch.split(x, [self.half_channels]*2, 1)
-    h = self.pre(x0) * x_mask
-    h = self.enc(h, x_mask, g=g)
-    stats = self.post(h) * x_mask
+    x0, x1 = torch.split(x, [self.half_channels]*2, 1)  
+    # x0.shape: [batch_size, half_channels, seq_length], 
+    # x1.shape: [batch_size, half_channels, seq_length]
+
+    h = self.pre(x0) * x_mask  
+    # h.shape: [batch_size, hidden_channels, seq_length]
+    h = self.enc(h, x_mask, g=g)  
+    # h.shape: [batch_size, hidden_channels, seq_length]
+    stats = self.post(h) * x_mask  
+    # stats.shape: [batch_size, half_channels * (2 - mean_only), seq_length]
+    
     if not self.mean_only:
-      m, logs = torch.split(stats, [self.half_channels]*2, 1)
+      m, logs = torch.split(stats, [self.half_channels]*2, 1)  
+      # m.shape: [batch_size, half_channels, seq_length], 
+      # logs.shape: [batch_size, half_channels, seq_length]
     else:
-      m = stats
-      logs = torch.zeros_like(m)
+      m = stats  
+      # m.shape: [batch_size, half_channels, seq_length]
+      logs = torch.zeros_like(m)  
+      # logs.shape: [batch_size, half_channels, seq_length]
 
     if not reverse:
-      x1 = m + x1 * torch.exp(logs) * x_mask
-      x = torch.cat([x0, x1], 1)
-      logdet = torch.sum(logs, [1,2])
+      x1 = m + x1 * torch.exp(logs) * x_mask  
+      # x1.shape: [batch_size, half_channels, seq_length]
+      x = torch.cat([x0, x1], 1)  
+      # x.shape: [batch_size, channels, seq_length]
+      logdet = torch.sum(logs, [1, 2])  
+      # logdet.shape: [batch_size]
       return x, logdet
     else:
-      x1 = (x1 - m) * torch.exp(-logs) * x_mask
-      x = torch.cat([x0, x1], 1)
+      x1 = (x1 - m) * torch.exp(-logs) * x_mask  
+      # x1.shape: [batch_size, half_channels, seq_length]
+      x = torch.cat([x0, x1], 1)  
+      # x.shape: [batch_size, channels, seq_length]
       return x
 
 
@@ -354,24 +387,48 @@ class ConvFlow(nn.Module):
     self.tail_bound = tail_bound
     self.half_channels = in_channels // 2
 
-    self.pre = nn.Conv1d(self.half_channels, filter_channels, 1)
-    self.convs = DDSConv(filter_channels, kernel_size, n_layers, p_dropout=0.)
-    self.proj = nn.Conv1d(filter_channels, self.half_channels * (num_bins * 3 - 1), 1)
+    self.pre = nn.Conv1d(self.half_channels, filter_channels, 1)  
+    # [half_channels, filter_channels, 1]
+
+    self.convs = DDSConv(filter_channels, kernel_size, n_layers, p_dropout=0.)  
+    # custom convolutional module
+
+    self.proj = nn.Conv1d(filter_channels, self.half_channels * (num_bins * 3 - 1), 1)  
+    # [filter_channels, half_channels * (num_bins * 3 - 1), 1]
+
     self.proj.weight.data.zero_()
     self.proj.bias.data.zero_()
 
   def forward(self, x, x_mask, g=None, reverse=False):
-    x0, x1 = torch.split(x, [self.half_channels]*2, 1)
-    h = self.pre(x0)
-    h = self.convs(h, x_mask, g=g)
-    h = self.proj(h) * x_mask
+    # x.shape: [batch_size, in_channels, x_seqlen]
+    # x_mask.shape: [batch_size, 1, x_seqlen]
+    x0, x1 = torch.split(x, [self.half_channels] * 2, 1)  
+    # x0.shape: [batch_size, half_channels, x_seqlen], 
+    # x1.shape: [batch_size, half_channels, x_seqlen]
 
-    b, c, t = x0.shape
-    h = h.reshape(b, c, -1, t).permute(0, 1, 3, 2) # [b, cx?, t] -> [b, c, t, ?]
+    h = self.pre(x0)  
+    # h.shape: [batch_size, filter_channels, x_seqlen]
 
-    unnormalized_widths = h[..., :self.num_bins] / math.sqrt(self.filter_channels)
-    unnormalized_heights = h[..., self.num_bins:2*self.num_bins] / math.sqrt(self.filter_channels)
-    unnormalized_derivatives = h[..., 2 * self.num_bins:]
+    h = self.convs(h, x_mask, g=g)  
+    # h.shape: [batch_size, filter_channels, x_seqlen]
+
+    h = self.proj(h) * x_mask  
+    # h.shape: [batch_size, half_channels * (num_bins * 3 - 1), x_seqlen]
+
+    b, c, t = x0.shape  
+    # b=batch_size, c=half_channels, t=x_seqlen
+
+    h = h.reshape(b, c, -1, t).permute(0, 1, 3, 2)  
+    # [batch_size, half_channels, x_seqlen, num_bins * 3 - 1]
+
+    unnormalized_widths = h[..., :self.num_bins] / math.sqrt(self.filter_channels)  
+    # [batch_size, half_channels, x_seqlen, num_bins]
+
+    unnormalized_heights = h[..., self.num_bins:2 * self.num_bins] / math.sqrt(self.filter_channels)  
+    # [batch_size, half_channels, x_seqlen, num_bins]
+
+    unnormalized_derivatives = h[..., 2 * self.num_bins:]  
+    # [batch_size, half_channels, x_seqlen, num_bins]
 
     x1, logabsdet = piecewise_rational_quadratic_transform(x1,
         unnormalized_widths,
@@ -380,11 +437,14 @@ class ConvFlow(nn.Module):
         inverse=reverse,
         tails='linear',
         tail_bound=self.tail_bound
-    )
+    )  
+    # x1.shape: [batch_size, half_channels, x_seqlen], 
+    # logabsdet.shape: [batch_size, half_channels, x_seqlen]
 
-    x = torch.cat([x0, x1], 1) * x_mask
-    logdet = torch.sum(logabsdet * x_mask, [1,2])
+    x = torch.cat([x0, x1], 1) * x_mask  # [batch_size, in_channels, x_seqlen]
+    logdet = torch.sum(logabsdet * x_mask, [1, 2])  # [batch_size]
     if not reverse:
-        return x, logdet
+        return x, logdet  # [batch_size, in_channels, x_seqlen], [batch_size]
     else:
-        return x
+        return x  # [batch_size, in_channels, x_seqlen]
+
